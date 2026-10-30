@@ -1,0 +1,13 @@
+# Build output (CMake puts JUCE, object files and the .exe here; it can always be rebuilt)
+build/
+out/
+
+# Editor and IDE files
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS clutter
+Thumbs.db
+.DS_Store
