@@ -39,10 +39,15 @@ public:
     void copySettingsFrom (const DrumEngine& other);
 
     // ---- shared state (UI writes, audio thread reads) ----
+    // Velocity: 0.05 .. 1. "Normal" (0.8, like MIDI velocity ~100) plays at unity gain,
+    // so there is room above it for accents.
+    static constexpr float normalVelocity = 0.8f;
+
     std::array<std::array<std::atomic<bool>, maxSteps>, numVoices> pattern;
+    std::array<std::array<std::atomic<float>, maxSteps>, numVoices> velocity;   // per step, used while the step is on
     std::array<std::atomic<bool>, numVoices> muted;
     std::array<std::atomic<bool>, numVoices> previewRequest;  // play once, never recorded
-    std::array<std::atomic<float>, numVoices> liveHit;        // velocity 0..1 (0 = none); recorded when REC is on
+    std::array<std::atomic<float>, numVoices> liveHit;        // velocity 0.05..1 (0 = none); recorded when REC is on
     std::array<std::atomic<const Sample*>, numVoices> samples; // nullptr = built-in synth sound.
                                                                // The UI keeps every Sample alive, the
                                                                // audio thread never frees anything.
@@ -127,8 +132,8 @@ private:
     std::vector<float> mainBuf, revL, revR, dlySend;
 
     void fireStep();
-    void triggerVoice (int v, float velocity = 1.0f);
-    void recordHit (int v);
+    void triggerVoice (int v, float vel = normalVelocity);
+    void recordHit (int v, float vel);
     void startStutter();
     double stepSamples() const;   // length of a 16th without swing
     void renderBlock (float* left, float* right, int numSamples, bool isPlaying);

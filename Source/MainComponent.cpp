@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include <BinaryData.h>
 
 namespace
 {
@@ -38,25 +39,40 @@ namespace
     {
         const char* name;
         float tempo, swing;               // swing in percent (0..60)
-        std::array<const char*, DrumEngine::numVoices> rows;   // 'x' = hit; spaces ignored
+        std::array<const char*, DrumEngine::numVoices> rows;   // x = hit, X = accent, o = soft (ghost); spaces ignored
     };
 
     // Voice order: kick, snare, clap, rim, low tom, hi tom, closed hat, open hat, crash, ride
     const Preset presets[] =
     {
-        { "Boom bap", 92, 22, { "x... ...x x... ....", ".... x... .... x...", "", ".... .... ..x. ....",
-                                "", "", "x.x. x.x. x.x. x.xx", ".... ...x .... ....", "", "" } },
+        { "Boom bap", 92, 22, { "x... ...x x... ....", "...o x... ..o. x...", "", ".... .... ..x. ....",
+                                "", "", "X.x. X.x. X.x. X.xo", ".... ...x .... ....", "", "" } },
         { "Four on the floor", 124, 0, { "x... x... x... x...", "", ".... x... .... x...", "",
                                          "", "", "x.x. x.x. x.x. x.x.", "..x. ..x. ..x. ..x.", "", "" } },
         { "Electro", 118, 8, { "x... ..x. ..x. ....", ".... x... .... x...", ".... x... .... x..x", "",
-                               ".... .... .... .x..", ".... .... .... ..x.", "xxxx xxxx xxxx xxxx", "", "", "" } },
+                               ".... .... .... .x..", ".... .... .... ..x.", "Xoxo Xoxo Xoxo Xoxo", "", "", "" } },
         { "Rock", 110, 0, { "x... ..x. x.x. ....", ".... x... .... x...", "", "",
                             ".... .... .... ..xx", ".... .... .... xx..", ".... .... .... ....", "", "x... .... .... ....",
                             "..x. x.x. x.x. ...." } },
-        { "Jazz ride", 140, 50, { "x... .... .... ....", ".... .... .... ..x.", "", "",
-                                  "", "", ".... x... .... x...", "", "", "x... x.xx x... x.xx" } },
+        { "Jazz ride", 140, 50, { "o... .... .... ....", ".... .... .... ..o.", "", "",
+                                  "", "", ".... x... .... x...", "", "", "X... x.ox X... x.ox" } },
         { "Empty", 104, 0, { "", "", "", "", "", "", "", "", "", "" } },
     };
+
+    // pattern-row characters -> velocity
+    float velocityForChar (juce::juce_wchar c)
+    {
+        if (c == 'X') return 1.0f;
+        if (c == 'o') return 0.45f;
+        return DrumEngine::normalVelocity;
+    }
+
+    int velocityToMidi (float v)   { return juce::jlimit (1, 127, juce::roundToInt (v * 127.0f)); }
+    float velocityFromMidi (int n)
+    {
+        return n == velocityToMidi (DrumEngine::normalVelocity) ? DrumEngine::normalVelocity
+                                                                 : juce::jlimit (0.05f, 1.0f, (float) n / 127.0f);
+    }
 
     juce::Font mono (float size, bool bold = false)
     {
@@ -450,15 +466,28 @@ void StepGrid::paint (juce::Graphics& g)
             auto r = stepRect (v, s);
             const bool on = engine.pattern[(size_t) v][(size_t) s].load();
             const bool isNow = (s == playhead);
+            const float vel = engine.velocity[(size_t) v][(size_t) s].load();
 
-            juce::Colour c = on ? groupColour (groupOf[(size_t) s]) : Colours::stepOff;
-            if (on && isMuted) c = c.withAlpha (0.35f);
-            if (on && isNow)   c = c.brighter (0.3f);
+            juce::Colour c = groupColour (groupOf[(size_t) s]);
+            if (isMuted) c = c.withAlpha (0.35f);
+            if (isNow)   c = c.brighter (0.3f);
 
             g.setColour (juce::Colours::black.withAlpha (0.4f));
             g.fillRoundedRectangle (r.translated (0.0f, 2.0f), 3.0f);
-            g.setColour (c);
+            g.setColour (Colours::stepOff);
             g.fillRoundedRectangle (r, 3.0f);
+
+            if (on)
+            {
+                // a lit step is filled from the bottom up to its velocity: full = accent,
+                // 80% = normal, a short fill = a ghost note
+                g.setColour (c.withMultipliedAlpha (0.3f));
+                g.fillRoundedRectangle (r, 3.0f);
+                juce::Graphics::ScopedSaveState state (g);
+                g.reduceClipRegion (r.withTop (r.getBottom() - r.getHeight() * vel).getSmallestIntegerContainer());
+                g.setColour (c);
+                g.fillRoundedRectangle (r, 3.0f);
+            }
 
             const float ledSize = juce::jmin (6.0f, r.getWidth() * 0.3f);
             auto led = juce::Rectangle<float> (ledSize, ledSize).withCentre ({ r.getCentreX(), r.getY() + r.getHeight() * 0.25f });
@@ -469,6 +498,17 @@ void StepGrid::paint (juce::Graphics& g)
             {
                 g.setColour (Colours::ink);
                 g.drawRoundedRectangle (r.expanded (1.5f), 4.0f, 2.0f);
+            }
+
+            // while a velocity is being changed, show it as a MIDI number (1-127)
+            if (on && v == velShowRow && s == velShowStep)
+            {
+                g.setColour (Colours::bg.withAlpha (0.85f));
+                auto tag = r.withSizeKeepingCentre (juce::jmax (r.getWidth(), 28.0f), 16.0f).withY (r.getBottom() - 18.0f);
+                g.fillRoundedRectangle (tag, 3.0f);
+                g.setColour (Colours::ink);
+                g.setFont (mono (10.5f, true));
+                g.drawText (juce::String (velocityToMidi (vel)), tag, juce::Justification::centred);
             }
         }
     }
@@ -488,8 +528,28 @@ bool StepGrid::hitStep (juce::Point<float> p, int& row, int& step) const
 
 void StepGrid::setStep (int row, int step, bool on)
 {
+    if (on)   // a newly drawn step starts at normal velocity
+        engine.velocity[(size_t) row][(size_t) step].store (DrumEngine::normalVelocity);
     engine.pattern[(size_t) row][(size_t) step].store (on);
     repaint();
+}
+
+void StepGrid::setVelocity (int row, int step, float vel)
+{
+    engine.velocity[(size_t) row][(size_t) step].store (juce::jlimit (0.05f, 1.0f, vel));
+    velShowRow = row;
+    velShowStep = step;
+    velShowUntil = juce::Time::getMillisecondCounter() + 900;
+    repaint (stepRect (row, step).expanded (4.0f).getSmallestIntegerContainer());
+}
+
+void StepGrid::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    int row, step;
+    if (hitStep (e.position, row, step) && engine.pattern[(size_t) row][(size_t) step].load())
+        setVelocity (row, step, engine.velocity[(size_t) row][(size_t) step].load() + wheel.deltaY * 0.4f);
+    else
+        Component::mouseWheelMove (e, wheel);
 }
 
 void StepGrid::flashVoice (int v)
@@ -507,6 +567,12 @@ void StepGrid::tick()
             flashUntil[(size_t) v] = 0;
             repaint (nameRect (v).toNearestInt().expanded (2));
         }
+
+    if (velShowRow >= 0 && ! velDragging && now >= velShowUntil)
+    {
+        repaint (stepRect (velShowRow, velShowStep).expanded (4.0f).getSmallestIntegerContainer());
+        velShowRow = velShowStep = -1;
+    }
 }
 
 void StepGrid::mouseDown (const juce::MouseEvent& e)
@@ -560,6 +626,16 @@ void StepGrid::mouseDown (const juce::MouseEvent& e)
     }
 
     int row, step;
+    if (hitStep (p, row, step) && e.mods.isShiftDown() && engine.pattern[(size_t) row][(size_t) step].load())
+    {
+        // Shift + drag up/down on a lit step sets its velocity
+        velDragging = true;
+        velDragStartY = p.y;
+        velDragStart = engine.velocity[(size_t) row][(size_t) step].load();
+        setVelocity (row, step, velDragStart);
+        return;
+    }
+
     if (hitStep (p, row, step))
     {
         dragValue = ! engine.pattern[(size_t) row][(size_t) step].load();
@@ -574,6 +650,12 @@ void StepGrid::mouseDown (const juce::MouseEvent& e)
 
 void StepGrid::mouseDrag (const juce::MouseEvent& e)
 {
+    if (velDragging)
+    {
+        setVelocity (velShowRow, velShowStep, velDragStart + (velDragStartY - e.position.y) / 120.0f);
+        return;
+    }
+
     // drag along a row to paint or erase several steps in one go
     int row, step;
     if (dragging && hitStep (e.position, row, step) && row == dragRow
@@ -583,6 +665,13 @@ void StepGrid::mouseDrag (const juce::MouseEvent& e)
 
 void StepGrid::mouseUp (const juce::MouseEvent&)
 {
+    if (velDragging)
+    {
+        velDragging = false;
+        velShowUntil = juce::Time::getMillisecondCounter() + 600;
+        if (! engine.playing.load())   // hear the new velocity
+            engine.liveHit[(size_t) velShowRow].store (engine.velocity[(size_t) velShowRow][(size_t) velShowStep].load());
+    }
     dragging = false;
     dragRow = -1;
 }
@@ -625,12 +714,9 @@ MainComponent::MainComponent()
     setWantsKeyboardFocus (true);
     formats.registerBasicFormats();
 
-    juce::PropertiesFile::Options opts;
-    opts.applicationName     = "DR-16";
-    opts.folderName          = "DR-16";
-    opts.filenameSuffix      = ".settings";
-    opts.osxLibrarySubFolder = "Application Support";
-    settings = std::make_unique<juce::PropertiesFile> (opts);
+    migrateFromDR16();
+    settings = std::make_unique<juce::PropertiesFile> (settingsOptions ("Arrhythmetic"));
+    icon = juce::ImageCache::getFromMemory (BinaryData::icon32_png, BinaryData::icon32_pngSize);
 
     auto styleLabel = [this] (juce::Label& l, const juce::String& text)
     {
@@ -644,8 +730,8 @@ MainComponent::MainComponent()
     styleLabel (volumeLabel, "VOLUME");
     styleLabel (meterLabel, "TIME SIGNATURE");
     styleLabel (presetLabel, "PATTERN");
-    styleLabel (hintLabel, "Click a voice to hear it, right-click it (or drop a file) for your own sound.  Keys or MIDI play "
-                           "the voices, REC records.  Click RV/DL/CP/DS/ST to route all.  Space = start/stop,  Hold Q = stutter");
+    styleLabel (hintLabel, "Click a voice to hear it, right-click for your own sound.  Keys or MIDI play, REC records.  "
+                           "Wheel or Shift+drag on a step = velocity.  Space = start/stop,  hold Q = stutter");
     hintLabel.setFont (mono (10.0f));
 
     // Tempo: an LED-style box you click and type into. Up/Down arrows nudge it too.
@@ -843,7 +929,11 @@ void MainComponent::loadPreset (int index)
         juce::String row (p.rows[(size_t) v]);
         row = row.removeCharacters (" ");
         for (int s = 0; s < DrumEngine::maxSteps; ++s)
-            engine.pattern[(size_t) v][(size_t) s].store (s < row.length() && row[s] == 'x');
+        {
+            const bool on = s < row.length() && (row[s] == 'x' || row[s] == 'X' || row[s] == 'o');
+            engine.velocity[(size_t) v][(size_t) s].store (on ? velocityForChar (row[s]) : DrumEngine::normalVelocity);
+            engine.pattern[(size_t) v][(size_t) s].store (on);
+        }
     }
 
     meterBox.setSelectedItemIndex (fourFour, juce::sendNotificationSync);   // presets are all 4/4
@@ -856,6 +946,8 @@ void MainComponent::clearPattern()
 {
     for (auto& row : engine.pattern)
         for (auto& s : row) s.store (false);
+    for (auto& row : engine.velocity)
+        for (auto& s : row) s.store (DrumEngine::normalVelocity);
     grid.repaint();
 }
 
@@ -922,7 +1014,7 @@ bool MainComponent::loadSample (int voice, const juce::File& file, bool remember
     if (reader == nullptr)
     {
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Can't load sound",
-                                                file.getFileName() + " isn't an audio file DR-16 can read "
+                                                file.getFileName() + " isn't an audio file Arrhythmetic can read "
                                                 "(use WAV, AIFF, FLAC, OGG or MP3).");
         return false;
     }
@@ -1001,7 +1093,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
             // holding a key down sends repeats; only the first press is a hit
             if (heldKeys.insert (key.getKeyCode()).second)
             {
-                engine.liveHit[(size_t) v].store (1.0f);
+                engine.liveHit[(size_t) v].store (DrumEngine::normalVelocity);   // a computer key has no velocity
                 grid.flashVoice (v);
             }
             return true;
@@ -1065,12 +1157,22 @@ void MainComponent::paint (juce::Graphics& g)
     g.setColour (Colours::edge);
     g.drawRoundedRectangle (panel.reduced (0.5f), 10.0f, 1.0f);
 
+    // header: pixel icon at 1:1 so it stays crisp, the Greek name, the model number
     auto header = getLocalBounds().reduced (36, 0).withTrimmedTop (28).withHeight (30);
-    g.setFont (mono (22.0f, true));
+    if (icon.isValid())
+    {
+        g.setImageResamplingQuality (juce::Graphics::lowResamplingQuality);
+        g.drawImageAt (icon, header.getX(), header.getCentreY() - icon.getHeight() / 2);
+        header.removeFromLeft (icon.getWidth() + 12);
+    }
+    const juce::String name (juce::CharPointer_UTF8 ("\xce\x91\xcf\x81\xcf\x81\xcf\x85\xce\xb8\xce\xbc\xce\xbf\xce\xbc\xce\xb7\xcf\x87\xce\xb1\xce\xbd\xce\xae"));   // the Greek name, mixed case
+    const auto titleFont = mono (22.0f, true);
+    g.setFont (titleFont);
     g.setColour (Colours::ink);
-    g.drawText ("PANO", header, juce::Justification::centredLeft);
+    g.drawText (name, header, juce::Justification::centredLeft);
     g.setColour (Colours::g1);
-    g.drawText ("DR-16", header.withTrimmedLeft (74), juce::Justification::centredLeft);
+    g.drawText ("DR-16", header.withTrimmedLeft ((int) juce::GlyphArrangement::getStringWidth (titleFont, name) + 14),
+                juce::Justification::centredLeft);
 
     g.setFont (mono (11.0f));
     g.setColour (Colours::muted);
@@ -1086,7 +1188,7 @@ void MainComponent::resized()
     headerRow.removeFromRight (8);
     saveButton.setBounds (headerRow.removeFromRight (70));
     headerRow.removeFromRight (16);
-    midiStatusArea = headerRow.withTrimmedLeft (200);
+    midiStatusArea = headerRow.withTrimmedLeft (380);
 
     area.removeFromTop (78);
 
@@ -1131,12 +1233,12 @@ void MainComponent::resized()
 
 //==============================================================================
 // Saved patterns: one small JSON file per pattern in the user's app-data folder
-// (on Windows: %APPDATA%\DR-16\Patterns).
+// (on Windows: %APPDATA%\Arrhythmetic\Patterns).
 
 juce::File MainComponent::patternFolder()
 {
     return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-               .getChildFile ("DR-16").getChildFile ("Patterns");
+               .getChildFile ("Arrhythmetic").getChildFile ("Patterns");
 }
 
 void MainComponent::rebuildPatternMenu (int idToSelect)
@@ -1220,7 +1322,7 @@ void MainComponent::savePattern (const juce::String& name)
 
     auto* obj = new juce::DynamicObject();
     obj->setProperty ("format", "DR-16 pattern");
-    obj->setProperty ("version", 2);
+    obj->setProperty ("version", 3);
     obj->setProperty ("name", name);
     obj->setProperty ("timeSignature", timeSigs[juce::jmax (0, meterBox.getSelectedItemIndex())].name);
     obj->setProperty ("tempo", (double) engine.tempo.load());
@@ -1244,6 +1346,16 @@ void MainComponent::savePattern (const juce::String& name)
             sounds->setProperty (DrumEngine::voiceId (v), smp->path);
     }
     obj->setProperty ("steps", juce::var (steps));
+
+    auto* velocities = new juce::DynamicObject();   // MIDI-style 1-127, one per step
+    for (int v = 0; v < DrumEngine::numVoices; ++v)
+    {
+        juce::Array<juce::var> row;
+        for (int st = 0; st < DrumEngine::maxSteps; ++st)
+            row.add (velocityToMidi (engine.velocity[(size_t) v][(size_t) st].load()));
+        velocities->setProperty (DrumEngine::voiceId (v), row);
+    }
+    obj->setProperty ("velocity", juce::var (velocities));
     obj->setProperty ("muted", mutedVoices);
     obj->setProperty ("sounds", juce::var (sounds));
 
@@ -1294,7 +1406,7 @@ void MainComponent::savePattern (const juce::String& name)
     if (! file.replaceWithText (juce::JSON::toString (juce::var (obj))))
     {
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Couldn't save",
-                                                "DR-16 couldn't write to " + file.getFullPathName());
+                                                "Arrhythmetic couldn't write to " + file.getFullPathName());
         return;
     }
 
@@ -1311,7 +1423,7 @@ void MainComponent::loadPatternFile (const juce::File& file)
     if (! json.isObject())
     {
         juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Can't open pattern",
-                                                file.getFileName() + " isn't a valid DR-16 pattern.");
+                                                file.getFileName() + " isn't a valid pattern file.");
         return;
     }
 
@@ -1325,6 +1437,7 @@ void MainComponent::loadPatternFile (const juce::File& file)
     swingSlider.setValue ((double) json["swing"], juce::sendNotificationSync);
 
     const auto steps  = json["steps"];
+    const auto velocities = json["velocity"];   // absent in files saved before version 3
     const auto sounds = json["sounds"];
     const auto* mutedVoices = json["muted"].getArray();
     juce::StringArray missing;
@@ -1334,8 +1447,14 @@ void MainComponent::loadPatternFile (const juce::File& file)
         const juce::Identifier id (DrumEngine::voiceId (v));
 
         const juce::String row = steps[id].toString();
+        const auto* vrow = velocities[id].getArray();
         for (int st = 0; st < DrumEngine::maxSteps; ++st)
+        {
+            const float vel = (vrow != nullptr && st < vrow->size()) ? velocityFromMidi ((int) vrow->getReference (st))
+                                                                      : DrumEngine::normalVelocity;
+            engine.velocity[(size_t) v][(size_t) st].store (vel);
             engine.pattern[(size_t) v][(size_t) st].store (st < row.length() && row[st] == 'x');
+        }
 
         engine.muted[(size_t) v].store (mutedVoices != nullptr && mutedVoices->contains (juce::var (id.toString())));
 
@@ -1462,7 +1581,7 @@ void MainComponent::chooseExportFile (bool midi, int bars)
                               const bool ok = midi ? sp->writeMidi (f, bars) : sp->writeWav (f, bars);
                               if (! ok)
                                   juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Export failed",
-                                                                          "DR-16 couldn't write " + f.getFullPathName());
+                                                                          "Arrhythmetic couldn't write " + f.getFullPathName());
                               sp->grabKeyboardFocus();
                           });
 }
@@ -1533,7 +1652,8 @@ bool MainComponent::writeMidi (const juce::File& file, int bars)
 
                 const int tick = (bar * steps + st) * ticksPerStep + (st % 2 == 1 ? swingTicks : 0);
                 const int note = DrumEngine::voiceMidiNote (v);
-                const int velocity = juce::jlimit (1, 127, juce::roundToInt (100.0f * engine.voiceVolume[(size_t) v].load()));
+                const int velocity = velocityToMidi (engine.velocity[(size_t) v][(size_t) st].load()
+                                                     * engine.voiceVolume[(size_t) v].load());
                 seq.addEvent (juce::MidiMessage::noteOn (10, note, (juce::uint8) velocity), tick);   // channel 10 = drums
                 seq.addEvent (juce::MidiMessage::noteOff (10, note), tick + noteLength);
             }
@@ -1580,7 +1700,7 @@ void MainComponent::handleIncomingMidiMessage (juce::MidiInput*, const juce::Mid
     const int v = DrumEngine::voiceForMidiNote (m.getNoteNumber());
     if (v < 0) return;
 
-    engine.liveHit[(size_t) v].store (0.15f + 0.85f * m.getFloatVelocity());
+    engine.liveHit[(size_t) v].store (juce::jmax (0.05f, m.getFloatVelocity()));
     midiFlash[(size_t) v].store (true);
 }
 
@@ -1663,4 +1783,36 @@ void MainComponent::syncFxPanelFromEngine()
         if (f != E::fxStutter)
             fxBlocks[(size_t) f]->setOn (engine.fxOn[(size_t) f].load());
     grid.repaint();
+}
+
+//==============================================================================
+// The app was called DR-16 before it got its name. Settings and saved patterns lived
+// in a "DR-16" folder; copy them over once, so nothing is lost. The old folder stays
+// as a backup.
+
+juce::PropertiesFile::Options MainComponent::settingsOptions (const juce::String& name)
+{
+    juce::PropertiesFile::Options opts;
+    opts.applicationName     = name;
+    opts.folderName          = name;
+    opts.filenameSuffix      = ".settings";
+    opts.osxLibrarySubFolder = "Application Support";
+    return opts;
+}
+
+void MainComponent::migrateFromDR16()
+{
+    const auto oldSettings = settingsOptions ("DR-16").getDefaultFile();
+    const auto newSettings = settingsOptions ("Arrhythmetic").getDefaultFile();
+    if (oldSettings.existsAsFile() && ! newSettings.exists())
+    {
+        newSettings.getParentDirectory().createDirectory();
+        oldSettings.copyFileTo (newSettings);
+    }
+
+    const auto appData = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory);
+    const auto oldPatterns = appData.getChildFile ("DR-16").getChildFile ("Patterns");
+    const auto newPatterns = patternFolder();
+    if (oldPatterns.isDirectory() && ! newPatterns.exists())
+        oldPatterns.copyDirectoryTo (newPatterns);
 }

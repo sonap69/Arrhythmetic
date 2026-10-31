@@ -77,6 +77,7 @@ struct DrumEngine::Voice
     {
         sr = sampleRate;
         chokeCoef = std::exp (-1.0f / (0.01f * (float) sampleRate));   // ~10 ms fade when choked
+        tiltCoef  = 1.0f - std::exp (-juce::MathConstants<float>::twoPi * 1500.0f / (float) sampleRate);
         setRate (1.0f);
     }
 
@@ -95,7 +96,13 @@ struct DrumEngine::Voice
         if (std::abs (rate - currentRate) > 1.0e-4f)
             setRate (rate);
 
-        velGain = velocity;
+        // Velocity: normal (0.8, MIDI ~100) plays at unity. Loudness follows a 1.5 power
+        // curve (half velocity = about -9 dB), and soft hits also lose some top end,
+        // the way a drum struck gently sounds darker, not just quieter.
+        const float v = juce::jlimit (0.05f, 1.0f, velocity) / DrumEngine::normalVelocity;
+        velGain  = std::pow (v, 1.5f);
+        highGain = juce::jmin (1.0f, std::pow (v, 0.7f));
+        tiltLp   = 0.0f;
         sample = s;
         samplePos = 0.0;
         sampleStep = s != nullptr ? s->sampleRate / sr * rate : 0.0;
@@ -130,6 +137,11 @@ struct DrumEngine::Voice
             if (t > length) active = false;
         }
 
+        if (highGain < 0.999f)   // tilt: keep the body, turn the top end down
+        {
+            tiltLp += tiltCoef * (out - tiltLp);
+            out = tiltLp + (out - tiltLp) * highGain;
+        }
         out *= velGain;
 
         if (choking)
@@ -156,7 +168,7 @@ protected:
     bool choking = false;
     float chokeGain = 1.0f;
     float chokeCoef = 0.995f;
-    float velGain = 1.0f;
+    float velGain = 1.0f, highGain = 1.0f, tiltLp = 0.0f, tiltCoef = 0.2f;
     Noise noise;
 
     const Sample* sample = nullptr;
@@ -199,18 +211,24 @@ namespace
     struct Clap : Voice
     {
         SVF bp;
-        Clap() { length = 0.3f; }
+        Clap() { length = 100.0f; }   // ends itself, in real time (below)
         void setup() override { bp.set (fsr, 1300.0f, 1.2f); }
         void start() override { bp.reset(); }
         float generate() noexcept override
         {
-            // three quick bursts, then a longer tail: what makes a clap sound like several hands
+            // Three quick bursts, then a longer tail: what makes a clap sound like several
+            // hands. The bursts are timed in real seconds, not in pitched time: slowed down
+            // with the pitch they drift apart and are heard as separate claps. Pitch moves
+            // only the filter (tuned via fsr), so a low clap sounds darker, still one clap.
+            const float rt = t / currentRate;
+            if (rt > 0.3f) { active = false; return 0.0f; }
+
             float e = 0.0f;
             for (float o : { 0.0f, 0.011f, 0.022f })
-                if (t >= o && t < o + 0.011f)
-                    e = juce::jmax (e, 0.9f * std::exp (-(t - o) / 0.005f));
-            if (t >= 0.033f)
-                e = juce::jmax (e, 0.7f * std::exp (-(t - 0.033f) * 9.21f / 0.22f));
+                if (rt >= o && rt < o + 0.011f)
+                    e = juce::jmax (e, 0.9f * std::exp (-(rt - o) / 0.005f));
+            if (rt >= 0.033f)
+                e = juce::jmax (e, 0.7f * std::exp (-(rt - 0.033f) * 9.21f / 0.22f));
             return bp.bandpass (noise.next()) * e * 1.6f;
         }
     };
@@ -246,15 +264,17 @@ namespace
     struct Hat : Voice
     {
         std::array<float, 6> phases {};
-        SVF bp, hp;
-        float dec, level;
-        Hat (float decay, float lvl) : dec (decay), level (lvl) { length = decay + 0.05f; }
+        SVF bp, hp, noiseHp;
+        float dec, level, noiseMix, bpHz, bpQ;
+        Hat (float decay, float lvl, float noiseAmount, float bandHz, float bandQ)
+            : dec (decay), level (lvl), noiseMix (noiseAmount), bpHz (bandHz), bpQ (bandQ) { length = decay + 0.05f; }
         void setup() override
         {
-            bp.set (fsr, 10000.0f, 0.9f);
+            bp.set (fsr, bpHz, bpQ);
             hp.set (fsr, 7000.0f, 0.707f);
+            noiseHp.set (fsr, 7500.0f, 0.707f);
         }
-        void start() override { phases = {}; bp.reset(); hp.reset(); }
+        void start() override { phases = {}; bp.reset(); hp.reset(); noiseHp.reset(); }
         float generate() noexcept override
         {
             float s = 0.0f;
@@ -263,8 +283,9 @@ namespace
                 advance (phases[i], metalFreqs[i] * 1.4f, invSr);
                 s += square (phases[i]);
             }
-            s = hp.highpass (bp.bandpass (s * (1.0f / 6.0f)));
-            return s * env (t, dec) * level * 11.0f;   // filters remove most of the energy, so make it up here
+            s = hp.highpass (bp.bandpass (s * (1.0f / 6.0f))) * 11.0f;   // filters remove most of the energy, so make it up here
+            const float sizzle = noiseMix > 0.0f ? noiseHp.highpass (noise.next()) * noiseMix : 0.0f;
+            return (s + sizzle) * env (t, dec) * level;
         }
     };
 
@@ -286,6 +307,9 @@ namespace
             float lowCut, highCut;
             float modeScale;  // shifts the whole resonator bank
             float level;
+            float modeQ = 18.0f;      // resonator sharpness: higher = more defined, less noisy
+            float washDecay = 1.0f;   // wash and resonator sustain, as a fraction of decay
+            float strike = 0.0f;      // extra resonator excitation right at the hit (the stick)
         };
 
         static constexpr int numModes = 14;
@@ -301,7 +325,7 @@ namespace
         void setup() override
         {
             for (size_t i = 0; i < numModes; ++i)
-                modes[i].set (fsr, modeFreqs[i] * p.modeScale, 18.0f);
+                modes[i].set (fsr, modeFreqs[i] * p.modeScale, p.modeQ);
             washHp.set (fsr, 6000.0f, 0.707f);
             shimmerHp.set (fsr, 4500.0f, 0.707f);
             outHp.set (fsr, p.lowCut, 0.707f);
@@ -317,9 +341,16 @@ namespace
         {
             const float n = noise.next();
 
+            const float body  = env (t, p.decay);
+            const float sus   = env (t, p.decay * p.washDecay);
+            const float burst = std::exp (-t / 0.04f);
+            const float ping  = std::exp (-t / p.pingDecay);
+            const float hit   = std::exp (-t / 0.006f);
+
+            const float excite = n * (p.modes * sus + p.strike * hit);
             float modal = 0.0f;
             for (auto& m : modes)
-                modal += m.bandpassNorm (n);
+                modal += m.bandpassNorm (excite);
 
             // three ring-modulated pairs of squares: sums and differences of all their
             // harmonics give a dense, clangy spectrum instead of a few clear pitches
@@ -333,12 +364,8 @@ namespace
             const float shimmer = shimmerHp.highpass (ring);
             const float wash = washHp.highpass (n);
 
-            const float body  = env (t, p.decay);
-            const float burst = std::exp (-t / 0.04f);
-            const float ping  = std::exp (-t / p.pingDecay);
-
-            float x = wash * (p.wash * body + p.burst * burst)
-                    + modal * p.modes * body
+            float x = wash * (p.wash * sus + p.burst * burst)
+                    + modal
                     + shimmer * (p.shimmer * body + p.ping * ping);
 
             return outLp.lowpass (outHp.highpass (x)) * p.level;
@@ -388,14 +415,17 @@ DrumEngine::DrumEngine()
     voices[3] = std::make_unique<Rim>();
     voices[4] = std::make_unique<Tom> (140.0f, 85.0f, 0.4f, 0.25f);
     voices[5] = std::make_unique<Tom> (230.0f, 150.0f, 0.32f, 0.2f);
-    voices[6] = std::make_unique<Hat> (0.05f, 0.35f);
-    voices[7] = std::make_unique<Hat> (0.38f, 0.3f);
+    //                               decay  level  noise  band-pass Hz  Q
+    voices[6] = std::make_unique<Hat> (0.05f, 0.35f, 0.0f,  10000.0f, 0.9f);   // closed
+    voices[7] = std::make_unique<Hat> (0.9f, 0.30f, 0.8f, 8000.0f, 0.7f);   // open
     //                                       decay burst wash modes shim ping  pDec   lowCut  highCut  scale level
     voices[8] = std::make_unique<Cymbal> (Cymbal::Params { 2.4f, 0.8f, 0.45f, 2.0f, 0.35f, 0.0f, 0.10f, 3500.0f, 14000.0f, 1.0f, 0.6f }); // crash
-    voices[9] = std::make_unique<Cymbal> (Cymbal::Params { 1.8f, 0.15f, 0.12f, 1.4f, 0.55f, 0.9f, 0.09f, 2600.0f, 12000.0f, 0.9f, 0.65f }); // ride
+    voices[9] = std::make_unique<Cymbal> (Cymbal::Params { 2.4f, 0.3f, 0.06f, 0.9f, 0.25f, 0.5f, 0.12f, 2800.0f, 11000.0f, 0.9f, 0.7f, 25.0f, 0.6f, 3.0f }); // ride
 
     for (auto& row : pattern)
         for (auto& s : row) s.store (false);
+    for (auto& row : velocity)
+        for (auto& s : row) s.store (normalVelocity);
     for (auto& m : muted) m.store (false);
     for (auto& p : previewRequest) p.store (false);
     for (auto& h : liveHit) h.store (0.0f);
@@ -453,7 +483,10 @@ void DrumEngine::copySettingsFrom (const DrumEngine& o)
     for (size_t v = 0; v < (size_t) numVoices; ++v)
     {
         for (size_t s = 0; s < (size_t) maxSteps; ++s)
+        {
             pattern[v][s].store (o.pattern[v][s].load());
+            velocity[v][s].store (o.velocity[v][s].load());
+        }
         muted[v].store (o.muted[v].load());
         samples[v].store (o.samples[v].load());
         voiceVolume[v].store (o.voiceVolume[v].load());
@@ -514,11 +547,11 @@ double DrumEngine::stepSamples() const
     return sr * 60.0 / juce::jlimit (20.0, 400.0, (double) tempo.load()) / 4.0;
 }
 
-void DrumEngine::triggerVoice (int v, float velocity)
+void DrumEngine::triggerVoice (int v, float vel)
 {
     if (v == closedHat) voices[openHat]->choke();
     const float rate = std::pow (2.0f, juce::jlimit (-24.0f, 24.0f, voicePitch[(size_t) v].load()) / 12.0f);
-    voices[(size_t) v]->trigger (samples[(size_t) v].load(), velocity, rate);
+    voices[(size_t) v]->trigger (samples[(size_t) v].load(), vel, rate);
 }
 
 void DrumEngine::startStutter()
@@ -547,7 +580,7 @@ void DrumEngine::fireStep()
             continue;
         }
         if (pattern[(size_t) v][(size_t) step].load() && ! muted[(size_t) v].load())
-            triggerVoice (v);
+            triggerVoice (v, velocity[(size_t) v][(size_t) step].load());
     }
 
     currentStep.store (step);
@@ -562,7 +595,7 @@ void DrumEngine::fireStep()
 }
 
 // Write a live hit into the step it is closest to.
-void DrumEngine::recordHit (int v)
+void DrumEngine::recordHit (int v, float vel)
 {
     const int n = juce::jlimit (1, maxSteps, numSteps.load());
     const int upcoming = step % n;
@@ -579,6 +612,7 @@ void DrumEngine::recordHit (int v)
         target = previous;
     }
 
+    velocity[(size_t) v][(size_t) target].store (vel);
     pattern[(size_t) v][(size_t) target].store (true);
     patternVersion.fetch_add (1);
 }
@@ -607,7 +641,7 @@ void DrumEngine::render (float* left, float* right, int numSamples)
         {
             triggerVoice (v, vel);
             if (isPlaying && recording.load())
-                recordHit (v);
+                recordHit (v, vel);
         }
     }
 

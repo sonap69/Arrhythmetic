@@ -76,6 +76,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void fileDragEnter (const juce::StringArray&, int x, int y) override;
@@ -99,6 +100,12 @@ private:
     int dragRow = -1, dropRow = -1;
     std::vector<int> groupOf;          // group index for each step
     std::array<juce::uint32, DrumEngine::numVoices> flashUntil {};
+
+    // velocity editing: the step whose value is shown, and a Shift-drag in progress
+    int velShowRow = -1, velShowStep = -1;
+    juce::uint32 velShowUntil = 0;
+    bool velDragging = false;
+    float velDragStartY = 0.0f, velDragStart = 0.0f;
     std::array<juce::Slider, DrumEngine::numVoices> volumeKnobs, pitchKnobs;
 
     static constexpr int nameW = 140, knobW = 34, muteW = 28, fxW = 17, gap = 5, groupGap = 5, headerH = 20;
@@ -117,6 +124,7 @@ private:
     bool hitStep (juce::Point<float>, int& row, int& step) const;
     int rowAt (float y) const;
     void setStep (int row, int step, bool on);
+    void setVelocity (int row, int step, float vel);
 };
 
 //==============================================================================
@@ -160,7 +168,9 @@ private:
     void updateStutter();
     void syncFxPanelFromEngine();
 
-    // saved patterns
+    // settings and saved patterns
+    static juce::PropertiesFile::Options settingsOptions (const juce::String& name);
+    static void migrateFromDR16();
     static juce::File patternFolder();
     void rebuildPatternMenu (int idToSelect);
     void showSaveDialog();
@@ -191,6 +201,7 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::PropertiesFile> settings;
 
+    juce::Image icon;   // the 32 px pixel-art metronome
     juce::TooltipWindow tooltips { this };
     std::set<int> heldKeys;
 

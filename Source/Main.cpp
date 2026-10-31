@@ -1,14 +1,22 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "MainComponent.h"
 
-class DR16Application : public juce::JUCEApplication
+class ArrhythmeticApplication : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override    { return JUCE_APPLICATION_NAME_STRING; }
     const juce::String getApplicationVersion() override { return JUCE_APPLICATION_VERSION_STRING; }
     bool moreThanOneInstanceAllowed() override          { return true; }
 
-    void initialise (const juce::String&) override      { mainWindow = std::make_unique<MainWindow> (getApplicationName()); }
+    void initialise (const juce::String&) override
+    {
+        // Title bar: the Greek name and its English twin. The Greek name is the word for
+        // "calculator" (arithmomichani) with one extra rho: a machine with no rhythm.
+        // The bytes are UTF-8, written as escapes so every compiler reads them the same way.
+        const juce::String title = juce::String (juce::CharPointer_UTF8 ("\xce\x91\xcf\x81\xcf\x81\xcf\x85\xce\xb8\xce\xbc\xce\xbf\xce\xbc\xce\xb7\xcf\x87\xce\xb1\xce\xbd\xce\xae"))
+                                 + " (" + getApplicationName() + ")";
+        mainWindow = std::make_unique<MainWindow> (title);
+    }
     void shutdown() override                            { mainWindow = nullptr; }
     void systemRequestedQuit() override                 { quit(); }
 
@@ -38,4 +46,4 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
 };
 
-START_JUCE_APPLICATION (DR16Application)
+START_JUCE_APPLICATION (ArrhythmeticApplication)
