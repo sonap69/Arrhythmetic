@@ -1,0 +1,65 @@
+# Builds Arrhythmetic on a clean Windows machine at GitHub and publishes it as a release.
+#
+# To make a release: on GitHub, open the Actions tab, pick "Release" on the left,
+# click "Run workflow", type the version (for example v1.1.0) and press the green button.
+# About 15 minutes later the release, with the .exe attached, appears under Releases.
+# (Pushing a tag such as v1.1.0 does the same thing.)
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, for example v1.1.0"
+        required: true
+        default: "v1.1.0"
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed to create the release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v5
+
+      - name: Check the version looks like v1.2.3
+        shell: bash
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a version like v1.1.0"; exit 1
+          fi
+
+      - name: Configure (downloads JUCE)
+        run: cmake -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Check the .exe runs without the Visual C++ runtime installed
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          $deps = & $dumpbin.FullName /dependents build\Arrhythmetic_artefacts\Release\Arrhythmetic.exe | Out-String
+          Write-Output $deps
+          if ($deps -match 'VCRUNTIME|MSVCP') { throw "Arrhythmetic.exe still depends on the Visual C++ runtime" }
+
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          exe="Arrhythmetic-$TAG-windows.exe"
+          cp build/Arrhythmetic_artefacts/Release/Arrhythmetic.exe "$exe"
+          gh release create "$TAG" "$exe" \
+            --title "Arrhythmetic $TAG" \
+            --notes-file docs/release-notes.md \
+            --target "$GITHUB_SHA"

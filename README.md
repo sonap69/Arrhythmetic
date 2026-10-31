@@ -8,6 +8,10 @@ A desktop drum machine built with JUCE: 10 voices, up to 32 steps, odd time sign
 
 ![Arrhythmetic main window](docs/screenshot.png)
 
+## Download
+
+Windows 10/11: get the `.exe` from the [latest release](https://github.com/sonap69/Arrhythmetic/releases/latest) and run it, no install needed. Windows may warn that the app is from an unknown publisher (it isn't code-signed): click **More info**, then **Run anyway**.
+
 ## Build
 
 You need CMake 3.22+, Git, and a C++17 compiler. JUCE is downloaded automatically on the first configure (takes a minute or two).
@@ -82,3 +86,11 @@ Run `build/Arrhythmetic_artefacts/Release/Arrhythmetic`.
 - `Resources/` – the pixel-art metronome icon, and `make_icon.py`, the script that draws it (edit the script and run it to change the icon).
 
 The app was first called DR-16; that lives on as its model number, and as the `.dr16` pattern-file extension. On first start, Arrhythmetic copies settings and saved patterns over from the old DR-16 folders.
+
+## Releases
+
+`.github/workflows/release.yml` builds the app on a clean Windows machine at GitHub and publishes it. To make one: **Actions** tab, **Release**, **Run workflow**, type the version (for example `v1.2.0`). It also checks that the `.exe` doesn't need the Visual C++ runtime, so it runs on any Windows PC.
+
+## License
+
+[MIT](LICENSE). Copyright (c) 2026 Panagiotis Theodorou.
